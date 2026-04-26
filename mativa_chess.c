@@ -1501,6 +1501,7 @@ static int evaluate(const Position *pos) {
     U64 attacks;
     U64 raw_attacks;
     int bishops[2] = {0, 0};
+    U64 attackers[2], defenders[2];
 
     if (g_latprof.enabled) g_eval_cache_probes++;
     if (entry->key == pos->key) {
@@ -1518,6 +1519,42 @@ static int evaluate(const Position *pos) {
     king_pressure[WHITE] += popcount64(pawn_control[WHITE] & king_zone[BLACK]) * 2;
     king_pressure[BLACK] += popcount64(pawn_control[BLACK] & king_zone[WHITE]) * 2;
 
+    /* Pre-calculate attackers and defenders for piece safety */
+    attackers[WHITE] = 0; attackers[BLACK] = 0;
+    defenders[WHITE] = 0; defenders[BLACK] = 0;
+    
+    /* Count attackers: all pieces that can attack squares */
+    for (piece = WP; piece <= WK; piece++) {
+        bb = pos->bb[piece];
+        while (bb) {
+            sq = pop_lsb(&bb);
+            if (PIECE_TYPE[piece] == KNIGHT) attackers[WHITE] |= knight_attacks[sq];
+            else if (PIECE_TYPE[piece] == BISHOP || PIECE_TYPE[piece] == QUEEN) 
+                attackers[WHITE] |= bishop_attacks_from(sq, occ);
+            else if (PIECE_TYPE[piece] == ROOK || PIECE_TYPE[piece] == QUEEN) 
+                attackers[WHITE] |= rook_attacks_from(sq, occ);
+            else if (PIECE_TYPE[piece] == KING) attackers[WHITE] |= king_attacks[sq];
+            else if (PIECE_TYPE[piece] == PAWN) attackers[WHITE] |= pawn_attacks[WHITE][sq];
+        }
+    }
+    for (piece = BP; piece <= BK; piece++) {
+        bb = pos->bb[piece];
+        while (bb) {
+            sq = pop_lsb(&bb);
+            if (PIECE_TYPE[piece] == KNIGHT) attackers[BLACK] |= knight_attacks[sq];
+            else if (PIECE_TYPE[piece] == BISHOP || PIECE_TYPE[piece] == QUEEN) 
+                attackers[BLACK] |= bishop_attacks_from(sq, occ);
+            else if (PIECE_TYPE[piece] == ROOK || PIECE_TYPE[piece] == QUEEN) 
+                attackers[BLACK] |= rook_attacks_from(sq, occ);
+            else if (PIECE_TYPE[piece] == KING) attackers[BLACK] |= king_attacks[sq];
+            else if (PIECE_TYPE[piece] == PAWN) attackers[BLACK] |= pawn_attacks[BLACK][sq];
+        }
+    }
+    
+    /* Defenders are simply occupied squares by each side */
+    defenders[WHITE] = pos->occ[WHITE];
+    defenders[BLACK] = pos->occ[BLACK];
+
     for (piece = 0; piece < 12; piece++) {
         color = PIECE_COLOR[piece];
         type = PIECE_TYPE[piece];
@@ -1533,6 +1570,30 @@ static int evaluate(const Position *pos) {
             mg[color] += PIECE_VALUE_MG[type];
             eg[color] += PIECE_VALUE_EG[type];
             phase += TYPE_PHASE[type];
+
+            /* Piece safety: check if piece is attacked more than defended */
+            int attackers_count = popcount64(attackers[color ^ 1] & BIT(sq));
+            int defenders_count = popcount64(defenders[color] & 
+                ((type == KNIGHT) ? knight_attacks[sq] :
+                 (type == BISHOP) ? bishop_attacks_from(sq, occ) :
+                 (type == ROOK) ? rook_attacks_from(sq, occ) :
+                 (type == QUEEN) ? (rook_attacks_from(sq, occ) | bishop_attacks_from(sq, occ)) :
+                 (type == KING) ? king_attacks[sq] : 0));
+            
+            /* Penalize hanging pieces (attacked more than defended) */
+            if (attackers_count > defenders_count) {
+                int hanging_penalty = 0;
+                if (type == QUEEN) hanging_penalty = 300;
+                else if (type == ROOK) hanging_penalty = 200;
+                else if (type == BISHOP || type == KNIGHT) hanging_penalty = 150;
+                else if (type == KING) hanging_penalty = 500;
+                
+                /* Extra penalty if no defender at all */
+                if (defenders_count == 0) hanging_penalty += 100;
+                
+                mg[color] -= hanging_penalty;
+                eg[color] -= hanging_penalty / 2;
+            }
 
             if (type == KNIGHT) {
                 attacks = knight_attacks[sq];
