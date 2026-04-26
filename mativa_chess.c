@@ -359,8 +359,9 @@ static const int PIECE_COLOR[12] = {
 static const int TYPE_PHASE[6] = { 0, 1, 1, 2, 4, 0 };
 static const int PIECE_VALUE_MG[6] = { 100, 320, 335, 500, 910, 0 };
 static const int PIECE_VALUE_EG[6] = { 120, 300, 320, 520, 900, 0 };
-static const int PASSED_BONUS_MG[8] = { 0, 5, 10, 20, 35, 55, 85, 0 };
-static const int PASSED_BONUS_EG[8] = { 0, 8, 16, 30, 55, 90, 140, 0 };
+static const int PASSED_BONUS_MG[8] = { 0, 8, 15, 25, 45, 70, 110, 0 };
+static const int PASSED_BONUS_EG[8] = { 0, 12, 24, 40, 70, 120, 200, 0 };
+static const int PASSED_PROTECTED_BONUS_EG[8] = { 0, 4, 8, 14, 24, 40, 70, 0 };
 static const char PIECE_TO_CHAR[] = "PNBRQKpnbrqk";
 #ifdef _WIN32
 static const WCHAR *GUI_PIECE_GLYPHS[12] = {
@@ -1470,6 +1471,10 @@ static void probe_pawn_eval(const Position *pos, int mg[2], int eg[2], U64 pawn_
             if ((own_pawns[color ^ 1] & passed_masks[color][sq]) == 0ULL) {
                 mg[color] += PASSED_BONUS_MG[rel];
                 eg[color] += PASSED_BONUS_EG[rel];
+                /* Extra bonus for protected passed pawns */
+                if (pawn_supported_square(pawn_control[color], sq)) {
+                    eg[color] += PASSED_PROTECTED_BONUS_EG[rel];
+                }
             }
         }
     }
@@ -1745,6 +1750,57 @@ static int evaluate(const Position *pos) {
     mg[WHITE] += king_pressure[WHITE];
     mg[BLACK] += king_pressure[BLACK];
 
+    /* Passed pawn danger: penalize side with enemy passed pawns close to king */
+    {
+        U64 white_passed = 0, black_passed = 0;
+        int passed_danger_white = 0, passed_danger_black = 0;
+        
+        /* Find all passed pawns */
+        bb = pos->bb[WP];
+        while (bb) {
+            sq = pop_lsb(&bb);
+            if ((pos->bb[BP] & passed_masks[WHITE][sq]) == 0ULL) {
+                white_passed |= BIT(sq);
+            }
+        }
+        bb = pos->bb[BP];
+        while (bb) {
+            sq = pop_lsb(&bb);
+            if ((pos->bb[WP] & passed_masks[BLACK][sq]) == 0ULL) {
+                black_passed |= BIT(sq);
+            }
+        }
+        
+        /* Penalize passed pawns near the enemy king */
+        bb = white_passed;
+        while (bb) {
+            sq = pop_lsb(&bb);
+            int dist = (FILE_OF(sq) - FILE_OF(pos->king_sq[BLACK]));
+            if (dist < 0) dist = -dist;
+            int rank_dist = RANK_OF(sq) - RANK_OF(pos->king_sq[BLACK]);
+            if (rank_dist < 0) rank_dist = -rank_dist;
+            if (dist <= 2 && rank_dist <= 2) {
+                passed_danger_white += 30 + (RANK_OF(sq) * 15);
+            }
+        }
+        bb = black_passed;
+        while (bb) {
+            sq = pop_lsb(&bb);
+            int dist = (FILE_OF(sq) - FILE_OF(pos->king_sq[WHITE]));
+            if (dist < 0) dist = -dist;
+            int rank_dist = RANK_OF(sq) - RANK_OF(pos->king_sq[WHITE]);
+            if (rank_dist < 0) rank_dist = -rank_dist;
+            if (dist <= 2 && rank_dist <= 2) {
+                passed_danger_black += 30 + ((7 - RANK_OF(sq)) * 15);
+            }
+        }
+        
+        mg[WHITE] -= passed_danger_white;
+        eg[WHITE] -= passed_danger_white / 2;
+        mg[BLACK] -= passed_danger_black;
+        eg[BLACK] -= passed_danger_black / 2;
+    }
+
     /* King safety: penalize exposed kings with enemy bishops and queen nearby */
     {
         U64 white_king_zone = king_attacks[pos->king_sq[WHITE]] | BIT(pos->king_sq[WHITE]);
@@ -1943,6 +1999,9 @@ static int score_capture(U32 move) {
     }
     if (promo) score += 8000 + PIECE_VALUE_MG[promo];
     if (MOVE_FLAGS(move) & FLAG_EP) score += 10000;
+    /* Bonus for promotion moves, especially queen promotions */
+    if (promo == QUEEN) score += 5000;
+    else if (promo) score += 2000;
     return score;
 }
 
@@ -2209,7 +2268,10 @@ static int quiescence(Position *pos, int alpha, int beta, int ply) {
             if (MOVE_FLAGS(move) & FLAG_EP) gain += PIECE_VALUE_MG[PAWN];
             else if (MOVE_CAPTURED(move) != NO_PIECE) gain += PIECE_VALUE_MG[PIECE_TYPE[MOVE_CAPTURED(move)]];
             if (MOVE_PROMO(move)) gain += PIECE_VALUE_MG[MOVE_PROMO(move)] - PIECE_VALUE_MG[PAWN];
-            if (stand_pat + gain + 120 < alpha) continue;
+            /* Be more lenient with promotion moves in quiescence */
+            if (MOVE_PROMO(move) == QUEEN) {
+                if (stand_pat + gain < alpha - 200) continue;
+            } else if (stand_pat + gain + 120 < alpha) continue;
         }
         if (stand_ready && !incheck) {
             see = see_value_of_move(pos, move);
