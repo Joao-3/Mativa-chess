@@ -1450,9 +1450,14 @@ static void probe_pawn_eval(const Position *pos, int mg[2], int eg[2], U64 pawn_
             int cen = center_bonus(sq);
             int file = FILE_OF(sq);
 
-            mg[color] += PIECE_VALUE_MG[PAWN] + rel * 8 + cen;
-            eg[color] += PIECE_VALUE_EG[PAWN] + rel * 12 + cen;
+            mg[color] += PIECE_VALUE_MG[PAWN] + rel * 8 + cen * 2;
+            eg[color] += PIECE_VALUE_EG[PAWN] + rel * 12 + cen * 2;
             pawn_control[color] |= pawn_attacks[color][sq];
+
+            if (file == 0 || file == 7) {
+                mg[color] -= 15 + rel * 3;
+                eg[color] -= 10 + rel * 2;
+            }
 
             if (popcount64(own_pawns[color] & file_masks[file]) > 1) {
                 mg[color] -= 10;
@@ -1541,6 +1546,10 @@ static int evaluate(const Position *pos) {
                     mg[color] += 16 + rel * 2;
                     eg[color] += 10 + rel;
                 }
+                if (file >= 2 && file <= 5 && rel >= 2) {
+                    mg[color] += 8 + cen * 2;
+                    eg[color] += 6 + cen;
+                }
                 if (is_knight_home_square(color, sq)) home_minors[color]++;
             } else if (type == BISHOP) {
                 bishops[color]++;
@@ -1613,7 +1622,7 @@ static int evaluate(const Position *pos) {
         eg[BLACK] += 36;
     }
 
-    if (phase >= 16) {
+    if (phase >= 12) {
         mg[WHITE] -= home_minors[WHITE] * 10;
         mg[BLACK] -= home_minors[BLACK] * 10;
         if (home_rooks[WHITE] == 2 && pos->king_sq[WHITE] == 4) mg[WHITE] -= 10;
@@ -2843,7 +2852,7 @@ static void run_bench(int depth) {
 
     init_search_limits(&limits);
     if (depth > 0) limits.depth = depth;
-    else limits.depth = 6;
+    else limits.depth = 7;
 
     clear_hash();
     memset(g_si.history, 0, sizeof(g_si.history));
@@ -2890,7 +2899,7 @@ static void run_latency_report(int depth) {
 
     init_search_limits(&limits);
     if (depth > 0) limits.depth = depth;
-    else limits.depth = 6;
+    else limits.depth = 7;
 
     latprof_reset();
     g_emit_search_info = 0;
