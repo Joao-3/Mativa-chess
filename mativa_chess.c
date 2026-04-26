@@ -1611,7 +1611,12 @@ static int evaluate(const Position *pos) {
                     mg[color] += 8 + cen * 2;
                     eg[color] += 6 + cen;
                 }
-                if (is_knight_home_square(color, sq)) home_minors[color]++;
+                /* Penalize knights stuck on home squares more heavily */
+                if (is_knight_home_square(color, sq)) {
+                    home_minors[color]++;
+                    mg[color] -= 15;
+                    eg[color] -= 10;
+                }
             } else if (type == BISHOP) {
                 bishops[color]++;
                 raw_attacks = bishop_attacks_from(sq, occ);
@@ -1626,7 +1631,12 @@ static int evaluate(const Position *pos) {
                     mg[color] += 10 + rel * 2;
                     eg[color] += 8 + rel;
                 }
-                if (is_bishop_home_square(color, sq)) home_minors[color]++;
+                /* Penalize bishops stuck on home squares more heavily */
+                if (is_bishop_home_square(color, sq)) {
+                    home_minors[color]++;
+                    mg[color] -= 15;
+                    eg[color] -= 10;
+                }
             } else if (type == ROOK) {
                 int no_own = (own_pawns[color] & file_masks[file]) == 0ULL;
                 int no_enemy = (own_pawns[color ^ 1] & file_masks[file]) == 0ULL;
@@ -1656,7 +1666,12 @@ static int evaluate(const Position *pos) {
                     }
                 }
                 king_pressure[color] += popcount64(raw_attacks & king_zone[color ^ 1]) * 5;
-                if (is_rook_home_square(color, sq)) home_rooks[color]++;
+                /* Penalize rooks stuck on home squares more heavily */
+                if (is_rook_home_square(color, sq)) {
+                    home_rooks[color]++;
+                    mg[color] -= 20;
+                    eg[color] -= 12;
+                }
             } else if (type == QUEEN) {
                 raw_attacks = rook_attacks_from(sq, occ) | bishop_attacks_from(sq, occ);
                 attacks = raw_attacks & ~pos->occ[color];
@@ -1684,16 +1699,107 @@ static int evaluate(const Position *pos) {
     }
 
     if (phase >= 12) {
-        mg[WHITE] -= home_minors[WHITE] * 10;
-        mg[BLACK] -= home_minors[BLACK] * 10;
-        if (home_rooks[WHITE] == 2 && pos->king_sq[WHITE] == 4) mg[WHITE] -= 10;
-        if (home_rooks[BLACK] == 2 && pos->king_sq[BLACK] == 60) mg[BLACK] -= 10;
-        if (queen_developed[WHITE] && home_minors[WHITE] >= 3) mg[WHITE] -= 14;
-        if (queen_developed[BLACK] && home_minors[BLACK] >= 3) mg[BLACK] -= 14;
+        /* Stronger penalty for each undeveloped minor piece */
+        mg[WHITE] -= home_minors[WHITE] * 25;
+        mg[BLACK] -= home_minors[BLACK] * 25;
+        eg[WHITE] -= home_minors[WHITE] * 15;
+        eg[BLACK] -= home_minors[BLACK] * 15;
+        
+        /* Penalty for undeveloped rooks, especially with uncastled king */
+        if (home_rooks[WHITE] == 2 && pos->king_sq[WHITE] == 4) {
+            mg[WHITE] -= 35;
+            eg[WHITE] -= 20;
+        } else if (home_rooks[WHITE] == 1) {
+            mg[WHITE] -= 12;
+        }
+        if (home_rooks[BLACK] == 2 && pos->king_sq[BLACK] == 60) {
+            mg[BLACK] -= 35;
+            eg[BLACK] -= 20;
+        } else if (home_rooks[BLACK] == 1) {
+            mg[BLACK] -= 12;
+        }
+        
+        /* Heavy penalty when queen is active but minors are still home */
+        if (queen_developed[WHITE] && home_minors[WHITE] >= 3) {
+            mg[WHITE] -= 40;
+            eg[WHITE] -= 25;
+        }
+        if (queen_developed[BLACK] && home_minors[BLACK] >= 3) {
+            mg[BLACK] -= 40;
+            eg[BLACK] -= 25;
+        }
+        
+        /* Additional penalty for all three pieces (2 bishops + 1 rook) undeveloped */
+        int undeveloped_white = home_minors[WHITE] + home_rooks[WHITE];
+        int undeveloped_black = home_minors[BLACK] + home_rooks[BLACK];
+        if (undeveloped_white >= 3) {
+            mg[WHITE] -= 50;
+            eg[WHITE] -= 30;
+        }
+        if (undeveloped_black >= 3) {
+            mg[BLACK] -= 50;
+            eg[BLACK] -= 30;
+        }
     }
 
     mg[WHITE] += king_pressure[WHITE];
     mg[BLACK] += king_pressure[BLACK];
+
+    /* King safety: penalize exposed kings with enemy bishops and queen nearby */
+    {
+        U64 white_king_zone = king_attacks[pos->king_sq[WHITE]] | BIT(pos->king_sq[WHITE]);
+        U64 black_king_zone = king_attacks[pos->king_sq[BLACK]] | BIT(pos->king_sq[BLACK]);
+        U64 bishop_attackers_white = 0, bishop_attackers_black = 0;
+        U64 queen_attackers_white = 0, queen_attackers_black = 0;
+        
+        /* Count enemy bishops attacking near the king */
+        bb = pos->bb[BB];
+        while (bb) {
+            sq = pop_lsb(&bb);
+            if (bishop_attacks_from(sq, occ) & white_king_zone) bishop_attackers_white |= BIT(sq);
+        }
+        bb = pos->bb[WB];
+        while (bb) {
+            sq = pop_lsb(&bb);
+            if (bishop_attacks_from(sq, occ) & black_king_zone) bishop_attackers_black |= BIT(sq);
+        }
+        
+        /* Count enemy queens attacking near the king */
+        bb = pos->bb[BQ];
+        while (bb) {
+            sq = pop_lsb(&bb);
+            U64 att = rook_attacks_from(sq, occ) | bishop_attacks_from(sq, occ);
+            if (att & white_king_zone) queen_attackers_white |= BIT(sq);
+        }
+        bb = pos->bb[WQ];
+        while (bb) {
+            sq = pop_lsb(&bb);
+            U64 att = rook_attacks_from(sq, occ) | bishop_attacks_from(sq, occ);
+            if (att & black_king_zone) queen_attackers_black |= BIT(sq);
+        }
+        
+        /* Heavy penalty for king exposed to multiple bishops + queen */
+        int bb_count_white = popcount64(bishop_attackers_white);
+        int bb_count_black = popcount64(bishop_attackers_black);
+        int qq_count_white = popcount64(queen_attackers_white);
+        int qq_count_black = popcount64(queen_attackers_black);
+        
+        if (bb_count_white >= 2 && qq_count_white >= 1) {
+            mg[WHITE] -= 80;
+            eg[WHITE] -= 60;
+        } else if (bb_count_white >= 1 && qq_count_white >= 1) {
+            mg[WHITE] -= 50;
+            eg[WHITE] -= 35;
+        }
+        
+        if (bb_count_black >= 2 && qq_count_black >= 1) {
+            mg[BLACK] -= 80;
+            eg[BLACK] -= 60;
+        } else if (bb_count_black >= 1 && qq_count_black >= 1) {
+            mg[BLACK] -= 50;
+            eg[BLACK] -= 35;
+        }
+    }
 
     if (phase > 24) phase = 24;
 
